@@ -20,7 +20,7 @@ class AdminApp(QWidget):
 
         self.layout = QVBoxLayout()
 
-        self.input_label = QLabel('أدخل الكود المشفر (Method A):')
+        self.input_label = QLabel('أدخل كود الجهاز (Hardware Code):')
         self.layout.addWidget(self.input_label)
 
         self.input_text = QTextEdit()
@@ -46,27 +46,25 @@ class AdminApp(QWidget):
         self.setLayout(self.layout)
 
     def generate(self):
-        encrypted_hid = self.input_text.toPlainText().strip()
-        if not encrypted_hid:
-            QMessageBox.warning(self, 'خطأ', 'يرجى إدخال الكود المشفر')
+        hardware_id = self.input_text.toPlainText().strip()
+        if not hardware_id:
+            QMessageBox.warning(self, 'خطأ', 'يرجى إدخال كود الجهاز')
             return
         try:
-            hid = self.lm.decrypt_A(encrypted_hid)
-            activation_code = self.lm.encrypt_B(hid)
+            activation_code = self.lm.generate_activation_code(hardware_id)
             self.output_text.setText(activation_code)
-            self.save_to_db(hid, encrypted_hid, activation_code)
+            self.save_to_db(hardware_id, activation_code)
             self.copy_activation_button.show()
             QMessageBox.information(self, 'نجح', 'تم إنشاء كود التفعيل وحفظه في قاعدة البيانات')
         except Exception as e:
-            QMessageBox.warning(self, 'خطأ', f'فشل في فك التشفير: {str(e)}')
+            QMessageBox.warning(self, 'خطأ', f'فشل في إنشاء الكود: {str(e)}')
 
-    def save_to_db(self, hid, hid_a, hid_b):
+    def save_to_db(self, hardware_id, activation_code):
         db = self.load_db()
         record = {
             'ID': len(db) + 1,
-            'HID_raw': hid,
-            'HID_A': hid_a,
-            'HID_B': hid_b,
+            'HardwareID': hardware_id,
+            'ActivationCode': activation_code,
             'created_at': datetime.now().isoformat()
         }
         db.append(record)

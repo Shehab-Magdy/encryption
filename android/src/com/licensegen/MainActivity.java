@@ -23,24 +23,23 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Locale;
 
-import javax.crypto.Cipher;
 import javax.crypto.Mac;
-import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
-/** Android port of admin_app.py: Method A (Fernet) -> HID -> Method B (HMAC) activation code. */
+/** Android port of admin_app.py: sign a short hardware code into a short activation code via HMAC. */
 public class MainActivity extends Activity {
 
     // Must match license_core.py exactly.
-    private static final String FERNET_KEY_B64 = "NjhyX0tpLTMxVmFjTjB5bmZTTHFYbW1rUXpUVlNUYjlZcFN4dEdOVGxSdz0=";
     private static final String HMAC_KEY_B64 = "HrIJ4BDWQbKGt40uWL6RuBawhB25z7Jm2DhPdmnTdY8=";
+    private static final String B32_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    private static final int CODE_BYTES = 10; // 80 bits -> 16 base32 chars -> grouped as XXXX-XXXX-XXXX-XXXX
 
     private static final String DB_FILE = "licenses_db.json";
 
@@ -48,42 +47,43 @@ public class MainActivity extends Activity {
     private TextView output;
     private Button copyButton;
 
-    // ---- Core (mirrors LicenseManager.decrypt_A / encrypt_B) ----
+    // ---- Core (mirrors LicenseManager._encode_short_code / _normalize / generate_activation_code) ----
 
-    /** Fernet decrypt: token = 0x80 | ts(8) | iv(16) | AES-128-CBC ciphertext | HMAC-SHA256(32). */
-    static String decryptA(String token) throws Exception {
-        byte[] outer = Base64.decode(FERNET_KEY_B64, Base64.DEFAULT);
-        byte[] key = Base64.decode(new String(outer, StandardCharsets.US_ASCII), Base64.URL_SAFE);
-        if (key.length != 32) throw new IllegalStateException("Bad Fernet key");
-        byte[] signKey = Arrays.copyOfRange(key, 0, 16);
-        byte[] encKey = Arrays.copyOfRange(key, 16, 32);
-
-        byte[] data = Base64.decode(token, Base64.URL_SAFE);
-        if (data.length < 1 + 8 + 16 + 16 + 32 || data[0] != (byte) 0x80) {
-            throw new IllegalArgumentException("Invalid token");
+    /** Encode raw bytes as a short, human-readable grouped code (e.g. XK3F-9QPL-7ZRT-M2CD). */
+    static String encodeShortCode(byte[] raw) {
+        int totalBits = raw.length * 8;
+        int numChars = (totalBits + 4) / 5; // ceil(totalBits / 5)
+        BigInteger value = new BigInteger(1, raw); // unsigned
+        StringBuilder sb = new StringBuilder();
+        for (int i = numChars - 1; i >= 0; i--) {
+            int idx = value.shiftRight(i * 5).and(BigInteger.valueOf(0x1f)).intValue();
+            sb.append(B32_ALPHABET.charAt(idx));
         }
-        int macStart = data.length - 32;
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(signKey, "HmacSHA256"));
-        byte[] expected = mac.doFinal(Arrays.copyOfRange(data, 0, macStart));
-        if (!MessageDigest.isEqual(expected, Arrays.copyOfRange(data, macStart, data.length))) {
-            throw new IllegalArgumentException("Invalid signature");
+        StringBuilder grouped = new StringBuilder();
+        String code = sb.toString();
+        for (int i = 0; i < code.length(); i += 4) {
+            if (i > 0) grouped.append('-');
+            grouped.append(code, i, Math.min(i + 4, code.length()));
         }
-        Cipher c = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(encKey, "AES"),
-                new IvParameterSpec(Arrays.copyOfRange(data, 9, 25)));
-        return new String(c.doFinal(data, 25, macStart - 25), StandardCharsets.UTF_8);
+        return grouped.toString();
     }
 
-    /** Activation code = "<hid>|<hex hmac-sha256(hid)>". */
-    static String encryptB(String hid) throws Exception {
+    /** Normalize a user/admin-entered code for comparison (strip separators, uppercase). */
+    static String normalize(String code) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : code.trim().toUpperCase(Locale.US).toCharArray()) {
+            if (Character.isLetterOrDigit(c)) sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    /** Admin-side: sign a hardware code into a short activation code. */
+    static String generateActivationCode(String hardwareId) throws Exception {
         byte[] hmacKey = Base64.decode(HMAC_KEY_B64, Base64.DEFAULT);
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
-        byte[] sig = mac.doFinal(hid.getBytes(StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder(hid).append('|');
-        for (byte b : sig) sb.append(String.format("%02x", b));
-        return sb.toString();
+        byte[] sig = mac.doFinal(normalize(hardwareId).getBytes(StandardCharsets.UTF_8));
+        return encodeShortCode(Arrays.copyOfRange(sig, 0, CODE_BYTES));
     }
 
     // ---- JSON database (same record shape as admin_app.py) ----
@@ -108,13 +108,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void saveToDb(String hid, String hidA, String hidB) throws Exception {
+    private void saveToDb(String hardwareId, String activationCode) throws Exception {
         JSONArray db = loadDb();
         JSONObject rec = new JSONObject();
         rec.put("ID", db.length() + 1);
-        rec.put("HID_raw", hid);
-        rec.put("HID_A", hidA);
-        rec.put("HID_B", hidB);
+        rec.put("HardwareID", hardwareId);
+        rec.put("ActivationCode", activationCode);
         rec.put("created_at", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(new Date()));
         db.put(rec);
         try (FileOutputStream out = new FileOutputStream(dbFile())) {
@@ -138,12 +137,12 @@ public class MainActivity extends Activity {
         root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
 
         TextView inLabel = new TextView(this);
-        inLabel.setText("أدخل الكود المشفر (Method A):");
+        inLabel.setText("أدخل كود الجهاز (Hardware Code):");
         inLabel.setTextSize(16);
         root.addView(inLabel);
 
         input = new EditText(this);
-        input.setMinLines(3);
+        input.setMinLines(1);
         input.setGravity(Gravity.TOP | Gravity.START);
         input.setTypeface(Typeface.MONOSPACE);
         root.addView(input);
@@ -178,20 +177,19 @@ public class MainActivity extends Activity {
     }
 
     private void generate() {
-        String encrypted = input.getText().toString().trim();
-        if (encrypted.isEmpty()) {
-            toast("يرجى إدخال الكود المشفر");
+        String hardwareId = input.getText().toString().trim();
+        if (hardwareId.isEmpty()) {
+            toast("يرجى إدخال كود الجهاز");
             return;
         }
         try {
-            String hid = decryptA(encrypted);
-            String code = encryptB(hid);
+            String code = generateActivationCode(hardwareId);
             output.setText(code);
-            saveToDb(hid, encrypted, code);
+            saveToDb(hardwareId, code);
             copyButton.setVisibility(View.VISIBLE);
             toast("تم إنشاء كود التفعيل وحفظه في قاعدة البيانات");
         } catch (Exception e) {
-            toast("فشل في فك التشفير: " + e.getMessage());
+            toast("فشل في إنشاء الكود: " + e.getMessage());
         }
     }
 

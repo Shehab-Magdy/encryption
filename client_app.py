@@ -36,6 +36,7 @@ class LicenseApp(QWidget):
 
         self.activation_input = QLineEdit()
         self.activation_input.setPlaceholderText('أدخل كود التفعيل')
+        self.activation_input.textChanged.connect(self._format_code_input)
         self.layout.addWidget(self.activation_input)
 
         self.activate_button = QPushButton('تفعيل')
@@ -54,13 +55,36 @@ class LicenseApp(QWidget):
             self.copy_hid_button.hide()
         else:
             hid = self.lm.get_hardware_id()
-            encrypted_hid = self.lm.encrypt_A(hid)
             self.status_label.setText('برجاء ارسال تلك الاحرف الى الرقم التالي: ٠١٠٠٩٣٥٢٨٢٣')
             self.status_label.setStyleSheet('color: red')
-            self.hid_label.setText(encrypted_hid)
+            self.hid_label.setText(hid)
             self.activation_input.show()
             self.activate_button.show()
             self.copy_hid_button.show()
+
+    def _format_code_input(self, text):
+        """Auto-uppercase and auto-insert dashes every 4 chars as the user types/pastes"""
+        cursor = self.activation_input.cursorPosition()
+        alnum_before = sum(1 for ch in text[:cursor] if ch.isalnum())
+        normalized = ''.join(ch for ch in text.upper() if ch.isalnum())[:16]
+
+        grouped_chars = []
+        new_cursor = 0
+        for i, ch in enumerate(normalized):
+            if i > 0 and i % 4 == 0:
+                grouped_chars.append('-')
+            grouped_chars.append(ch)
+            if i + 1 == alnum_before:
+                new_cursor = len(grouped_chars)
+        if alnum_before >= len(normalized):
+            new_cursor = len(grouped_chars)
+
+        grouped = ''.join(grouped_chars)
+        if grouped != text:
+            self.activation_input.blockSignals(True)
+            self.activation_input.setText(grouped)
+            self.activation_input.setCursorPosition(new_cursor)
+            self.activation_input.blockSignals(False)
 
     def activate(self):
         code = self.activation_input.text().strip()
